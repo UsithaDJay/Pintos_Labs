@@ -133,6 +133,49 @@ pintos_init (void)
     /* Run actions specified on kernel command line. */
     run_actions (argv);
   } else {
+	bool exit = false;
+	while(!exit){
+		char* input = (char*) calloc(50, sizeof(char));
+		input_init();
+		int i = 0;
+		char c;
+		printf ("\nCS2043> ");
+		while(c=(input_getc())){
+			if(c=='\r'){
+				printf("\n");
+				break;
+			}else if(c=='\b' && i != 0){
+				printf("\b \b");
+				i--;
+				input[i] = NULL;
+			}else if(c != '\b' && c != '\t'){
+				input[i] = c;
+				printf("%c", input[i]);
+				i++;
+			}	
+		}
+		if (strcmp(input, "whoami") == 0){
+		  	printf ("\nCS2043> ");
+		  	printf("U.D. Jayaweera 200269J\n");
+		}else if(strcmp(input,"shutdown")==0){
+			break;
+		}else if (strcmp(input, "time")== 0){
+			printf ("\nCS2043> %lus\n",rtc_get_time());
+		}else if (strcmp(input, "ram")== 0){
+			printf ("\nCS2043> %dKB\n",init_ram_pages*4);
+		}else if (strcmp(input, "thread")== 0){
+			printf ("\nCS2043> ");
+			thread_print_stats();
+		}else if (strcmp(input, "priority")== 0){
+			printf ("\nCS2043> %i \n",thread_get_priority());
+		}else if (strcmp(input, "exit")== 0){
+			printf ("\nCS2043> ");
+			printf("Exiting shell..\n");
+			break;
+		}else {
+			printf("\"%s\"Command not found\n",input);
+		}
+	}
     // TODO: no command line passed to kernel. Run interactively 
   }
 
