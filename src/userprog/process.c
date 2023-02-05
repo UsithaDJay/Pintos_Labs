@@ -17,64 +17,136 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
-/* Starts a new thread running a user program loaded from
-   FILENAME.  The new thread may be scheduled (and may even exit)
-   before process_execute() returns.  Returns the new process's
-   thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
 process_execute (const char *file_name) 
 {
   char *fn_copy;
   tid_t tid;
+  
 
-  /* Make a copy of FILE_NAME.
-     Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  char *command_name;
+  char *save_ptr;
+  //This contains the first split string
+  command_name =strtok_r (file_name, " ", &save_ptr); 
+
+  struct process_control_block* pcb = palloc_get_page(0);
+
+  pcb->pid = -1;
+  pcb->parent_thread = thread_current();
+
+  sema_init(&pcb->sema_init, 0);
+  sema_init(&pcb->sema_wait, 0);
+
+  pcb->waiting = false;
+  pcb->exited = false;
+
+  pcb->cmdline = fn_copy;
+
+
+  tid = thread_create(command_name, PRI_DEFAULT, start_process, pcb);
+  
+  sema_down(&pcb->sema_init);
+
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+  if (tid == -1){
+    palloc_free_page (pcb);
+    return -1;
+  }
+  list_push_back(&thread_current()->pcb_list, &pcb->elem); 
   return tid;
 }
 
-/* A thread function that loads a user process and starts it
-   running. */
+
 static void
 start_process (void *file_name_)
 {
-  char *file_name = file_name_;
+  struct process_control_block* pcb = file_name_;
+
+  char *file_name = pcb->cmdline;
   struct intr_frame if_;
   bool success;
 
-  /* Initialize interrupt frame and load executable. */
+  //This keeps the splitted strings of arguments
+  char *arguments_retrieved[50];
+  char counter = 0;
+  char *split_str,*save_ptr;
+
+  //This loop will go through the agument string and split and add to arguments_retrieved
+  for (split_str = strtok_r(file_name," ",&save_ptr);split_str != NULL;
+  split_str = strtok_r(NULL," ",&save_ptr)) {
+      arguments_retrieved[counter++]=split_str;
+  }
+
+  
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
+  
+  if (success) {
+    pcb->pid = thread_current()->tid;
+    thread_current()->t_pcb = pcb; 
+    argument_stack_create(arguments_retrieved,counter,&if_.esp);
+  }
+
+  
+  sema_up(&pcb->sema_init);
+
+  // palloc_free_page (file_name);
   if (!success) 
     thread_exit ();
 
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
 }
+
+
+
+  //This function will create the argument stack
+  argument_stack_create(char **arguments,int count,void **esp){
+    
+    int argument_address_arr[count];
+    int size;
+    //Setting up address array
+    for (int i =count-1 ;i>=0;i--)
+    {
+      size  = strlen(arguments[i])+1;
+      *esp -= size;
+      memcpy(*esp,arguments[i],size);
+      argument_address_arr[i] = (int)*esp;
+      
+    }  
+      *esp = (int)*esp & 0xfffffffc;
+      *esp -= 4;
+      *(int*)*esp = 0;
+      for (int i=count-1; i>=0;i--){
+        *esp -= 4;
+        *(int*)*esp = argument_address_arr[i];
+      }
+    
+      *esp -= 4;
+      *(int*)*esp = (int)*esp + 4;
+      *esp -= 4;
+      *(int*)*esp = count;
+      *esp -= 4;
+      *(int*)*esp = 0;
+      
+  }
+
+
 
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
@@ -88,15 +160,52 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  return -1;
+  struct list* pcb_list = &thread_current()->pcb_list;
+
+  struct list_elem* e;
+  struct process_control_block* pcb;
+
+  for (e = list_begin (pcb_list); e != list_end (pcb_list); e = list_next (e)){
+    pcb = list_entry(e, struct process_control_block, elem);
+    if(pcb->pid == child_tid) break;
+  }
+
+  if(pcb == NULL || pcb->pid != child_tid || pcb->waiting || pcb->exited) return -1;
+
+  pcb->waiting = true;
+
+  sema_down(&pcb->sema_wait);
+
+  list_remove(&pcb->elem);
+
+  return pcb->exitcode;
+
 }
 
-/* Free the current process's resources. */
 void
 process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  struct list* pcb_list = &cur->pcb_list;
+  struct process_control_block* pcb;
+  while(!list_empty(pcb_list)) {
+    pcb = list_pop_back(pcb_list);
+
+    if(!pcb->exited){
+      pcb->parent_thread = NULL;
+    }else{
+      palloc_free_page(pcb);
+    }
+  }
+  if(cur->t_pcb != NULL){
+    cur->t_pcb->exited = true;
+    sema_up(&cur->t_pcb->sema_wait);
+
+    if(cur->t_pcb->parent_thread == NULL)
+      palloc_free_page(cur->t_pcb);
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -131,7 +240,7 @@ process_activate (void)
      interrupts. */
   tss_update ();
 }
-
+
 /* We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */
 
@@ -315,7 +424,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   file_close (file);
   return success;
 }
-
+
 /* load() helpers. */
 
 static bool install_page (void *upage, void *kpage, bool writable);
