@@ -42,11 +42,11 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  char *command_name;
+  char *name_of_the_command;
   char *pointer_save;
   
   //The first splitted string is available here
-  command_name =strtok_r (file_name, " ", &pointer_save); 
+  name_of_the_command =strtok_r (file_name, " ", &pointer_save); 
 
   struct control_block_for_process* pro_con_block = palloc_get_page(0);
 
@@ -68,7 +68,7 @@ process_execute (const char *file_name)
   pro_con_block->command_line = fn_copy;
 
    /* Create a new thread to execute FILE_NAME. */ 
-  tid = thread_create(command_name, PRI_DEFAULT, start_process, pro_con_block);
+  tid = thread_create(name_of_the_command, PRI_DEFAULT, start_process, pro_con_block);
   
   sema_down(&pro_con_block->sema_init);
     // Wait on the semaphore pro_con_block->sema_init
