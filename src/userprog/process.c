@@ -17,86 +17,282 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"
 
 static thread_func start_process NO_RETURN;
-static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static bool load (const char *command_line, void (**eip) (void), void **esp);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
+
 tid_t
 process_execute (const char *file_name) 
 {
   char *fn_copy;
   tid_t tid;
 
-  /* Make a copy of FILE_NAME.
+   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
+  
+
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  char *name_of_the_command;
+  char *pointer_save;
+  
+  //The first splitted string is available here
+  name_of_the_command =strtok_r (file_name, " ", &pointer_save); 
+
+  struct control_block_for_process* pro_con_block = palloc_get_page(0);
+
+  //Assign -1 as process ID
+  pro_con_block->proID = -1;
+
+  //Assign the current thread to the parent thread
+  pro_con_block->t_parent = thread_current();
+  
+  //Initialize the semaphore sema_init to 0
+  sema_init(&pro_con_block->sema_init, 0);
+  
+  //Initialize the semaphore sema_wait to 0
+  sema_init(&pro_con_block->sema_wait, 0);
+
+  pro_con_block->thread_waiting = false;
+  pro_con_block->thread_exited = false;
+
+  pro_con_block->command_line = fn_copy;
+
+   /* Create a new thread to execute FILE_NAME. */ 
+  tid = thread_create(name_of_the_command, PRI_DEFAULT, start_process, pro_con_block);
+  
+  sema_down(&pro_con_block->sema_init);
+    // Wait on the semaphore pro_con_block->sema_init
+
   if (tid == TID_ERROR)
+    // Check if the thread creation was not successful
+    
     palloc_free_page (fn_copy); 
+    // Free the allocated page for the function copy if thread creation was not successful
+
+  if (tid == -1){
+    // Check if the thread creation was not successful
+    
+    palloc_free_page (pro_con_block);
+    // Free the allocated page for the pro_con_block if thread creation was not successful
+    return -1;
+    // Return -1 as an error indicator
+  }
+  list_push_back(&thread_current()->list_of_pcbs, &pro_con_block->elem); 
+  // Push the pro_con_block to the list of pcb's of the current thread
+
   return tid;
+  // Return the thread ID of the newly created thread
 }
 
 /* A thread function that loads a user process and starts it
    running. */
+
 static void
 start_process (void *file_name_)
+// Definition of the start_process function, which takes a void pointer as input
 {
-  char *file_name = file_name_;
+  struct control_block_for_process* pro_con_block = file_name_;
+  // Typecast the void pointer to a pointer to a struct control_block_for_process
+  // And store the result in the variable pro_con_block
+
+  char *file_name = pro_con_block->command_line;
+  // Get the command line from the struct control_block_for_process and store it in file_name
+  
   struct intr_frame if_;
+  // Declare a struct intr_frame if_
   bool success;
 
-  /* Initialize interrupt frame and load executable. */
+  
+  char *fetched_arguments[50];
+  // Declare an array of pointers to characters named fetched_arguments with a capacity of 50
+
+  char count = 0;
+  char *string_splitted,*pointer_save;
+  // Declare two pointers to characters string_splitted and pointer_save
+
+  
+  for (string_splitted = strtok_r(file_name," ",&pointer_save);string_splitted != NULL;
+  string_splitted = strtok_r(NULL," ",&pointer_save)) {
+      fetched_arguments[count++]=string_splitted;
+      // Split the file_name string into tokens using " " as the delimiter
+      // Store each token in the fetched_arguments array and increment the count
+  }
+
+  /*Initialize interrupt frame and load executable.*/
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
+  
+  if (success) {
+    pro_con_block->proID = thread_current()->tid;
+    // Store the ID of the current thread in the proID field of the pro_con_block
+  
+    thread_current()->thread_pcbs = pro_con_block; 
+    // Store the pro_con_block in the thread_pcbs field of the current thread
+  
+    creation_of_stack_for_arguments(fetched_arguments,count,&if_.esp);
+    
+  }
+
+  
+  sema_up(&pro_con_block->sema_init);
+
+  // palloc_free_page (file_name);
   if (!success) 
     thread_exit ();
 
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
+   // Move the address of the struct intr_frame if_ to the esp register and jump to the intr_exit function
   NOT_REACHED ();
 }
 
-/* Waits for thread TID to die and returns its exit status.  If
+
+
+  //This function will create the argument stack
+  creation_of_stack_for_arguments(char **arguments,int count,void **esp){
+    
+    int array_of_argument_address[count];
+     // Array to store the addresses of the arguments
+    int size;
+    // Size variable to store the length of each argument
+
+    //Setting up address array
+    for (int i =count-1 ;i>=0;i--)
+    {
+      size  = strlen(arguments[i])+1;
+      // Calculate the size of the current argument
+      
+      *esp -= size;
+       // Decrement the esp by the size of the current argument
+
+      memcpy(*esp,arguments[i],size);
+      // Copy the current argument to the address pointed to by esp
+      
+      array_of_argument_address[i] = (int)*esp;
+      // Store the address of the current argument in the array_of_argument_address
+      
+    }  
+      *esp = (int)*esp & 0xfffffffc;
+      // Align the esp to a 4-byte boundary
+      *esp -= 4;
+      *(int*)*esp = 0;
+      // Align the esp to a 4-byte boundary
+
+      for (int i=count-1; i>=0;i--){
+        *esp -= 4;
+        *(int*)*esp = array_of_argument_address[i];
+        // Push the address of each argument to the stack in reverse order
+      }
+    
+      *esp -= 4;
+      *(int*)*esp = (int)*esp + 4;
+      // Push the address of the first argument to the stack
+
+      *esp -= 4;
+      *(int*)*esp = count;
+      // Push the argument count to the stack
+
+      *esp -= 4;
+      *(int*)*esp = 0;
+      // Push a 0 to the stack as the return address
+      
+  }
+
+
+
+/* Waits for thread tid to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
-   exception), returns -1.  If TID is invalid or if it was not a
+   exception), returns -1.  If tid is invalid or if it was not a
    child of the calling process, or if process_wait() has already
-   been successfully called for the given TID, returns -1
-   immediately, without waiting.
+   been successfully called for the given tid, returns -1
+   immediately, without thread_waiting.
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  return -1;
+  struct list* list_of_pcbs = &thread_current()->list_of_pcbs;
+  // Create a pointer to the list of child process control blocks in the current thread
+
+  struct list_elem* e;
+  // Create a pointer to traverse the list
+
+  struct control_block_for_process* pro_con_block;
+  // Create a pointer to a child process control block
+
+  for (e = list_begin (list_of_pcbs); e != list_end (list_of_pcbs); e = list_next (e)){
+    pro_con_block = list_entry(e, struct control_block_for_process, elem);
+    if(pro_con_block->proID == child_tid) break;
+  }
+  // Find the control block of the specified child process in the list
+
+  
+  if(pro_con_block == NULL || pro_con_block->proID != child_tid || pro_con_block->thread_waiting || pro_con_block->thread_exited) return -1;
+
+  pro_con_block->thread_waiting = true;
+  // Find the control block of the specified child process in the list
+
+
+  sema_down(&pro_con_block->sema_wait);
+  // Wait until the child process signals that it has exited
+
+  list_remove(&pro_con_block->elem);
+  // Remove the control block from the list of child process control blocks
+
+  return pro_con_block->exitcode;
+  // Return the exit code of the child process
+
 }
 
-/* Free the current process's resources. */
 void
 process_exit (void)
 {
   struct thread *cur = thread_current ();
+  // Get the current thread
+
   uint32_t *pd;
+  // pointer to page directory
+
+  struct list* list_of_pcbs = &cur->list_of_pcbs;
+  // Get the list of process control blocks associated with the current thread
+
+  struct control_block_for_process* pro_con_block;
+  // process control block of a child process
+
+  while(!list_empty(list_of_pcbs)) {
+    pro_con_block = list_pop_back(list_of_pcbs);
+    // remove the last process control block from the list
+
+    if(!pro_con_block->thread_exited){// if the child process has not exited
+      pro_con_block->t_parent = NULL;
+      // set the parent process to NULL
+
+    }else{
+      palloc_free_page(pro_con_block);
+      // free the page occupied by the process control block
+    }
+  }
+  if(cur->thread_pcbs != NULL){// if the current thread has a process control block associated with it
+    cur->thread_pcbs->thread_exited = true;// mark the thread as exited
+    sema_up(&cur->thread_pcbs->sema_wait);// signal the semaphore for the waiting parent process
+
+    if(cur->thread_pcbs->t_parent == NULL)// if the parent process is not present
+      palloc_free_page(cur->thread_pcbs);// free the page occupied by the process control block
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -131,7 +327,7 @@ process_activate (void)
      interrupts. */
   tss_update ();
 }
-
+
 /* We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */
 
@@ -315,7 +511,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   file_close (file);
   return success;
 }
-
+
 /* load() helpers. */
 
 static bool install_page (void *upage, void *kpage, bool writable);

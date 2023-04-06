@@ -404,7 +404,7 @@ idle (void *idle_started_ UNUSED)
          completion of the next instruction, so these two
          instructions are executed atomically.  This atomicity is
          important; otherwise, an interrupt could be handled
-         between re-enabling interrupts and waiting for the next
+         between re-enabling interrupts and thread_waiting for the next
          one to occur, wasting as much as one clock tick worth of
          time.
 
@@ -463,6 +463,12 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+
+#ifdef USERPROG
+  list_init(&t->list_of_files);
+  list_init(&t->list_of_pcbs);
+  
+#endif
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
